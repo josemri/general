@@ -1,581 +1,295 @@
---[[
-  Stockpile GUI Client v1.1
-  Cliente grafico para Stockpile (CC:Tweaked).
-  Genera /stockpile_client.log con informacion de depuracion.
-]]
-
--- Logger
-local logFile = "stockpile_client.log"
+-- Stockpile GUI v4.2
+local logFile = "stockpile.log"
 local fh = fs.open(logFile, "w")
 local function log(...)
-  local parts = {...}
-  local msg = os.date("%H:%M:%S") .. " " .. table.concat(parts, " ")
+  local msg = os.date("%H:%M:%S") .. " " .. table.concat({...}, " ")
   if fh then fh.writeLine(msg) fh.flush() end
 end
-log("=== Inicio ===")
+log("inicio")
 
-local GUI = {}
-
-local C = {
-  header  = colors.blue,    body    = colors.black,  bar     = colors.gray,
-  inputBg = colors.gray,    btn     = colors.cyan,   btnHov  = colors.lightBlue,
-  selBg   = colors.blue,    title   = colors.white,  white   = colors.white,
-  yellow  = colors.yellow,  green   = colors.green,  red     = colors.red,
-  gray    = colors.lightGray,
-}
-
-local L = {}
-local function layout()
-  L.w, L.h = term.getSize()
-  L.inputY = 3
-  L.listTop = 5
-  L.listBot = L.h - 1
-  L.statusY = L.h
+local modemSide = ""
+for _, s in ipairs(peripheral.getNames()) do
+  if peripheral.hasType(s, "modem") then rednet.open(s); modemSide = s; break end
 end
-
-local state = {
-  server = nil, items = {}, keys = {}, scroll = 0, sel = nil,
-  status = "Iniciando...", query = "", input = false,
-}
-
-local btnList = {}
-local function btn(label, action)
-  table.insert(btnList, { label = label, action = action })
-end
-
-local function rClear(y)
-  term.setCursorPos(1, y)
-  term.clearLine()
-end
-
-local function rHeader()
-  term.setBackgroundColor(C.header)
-  rClear(1)
-  term.setTextColor(C.title)
-  term.write(" Stockpile ")
-  local titleEnd = term.getCursorPos()
-  local bx = L.w + 1
-  for i = #btnList, 1, -1 do
-    local b = btnList[i]
-    local bw = #b.label + 3
-    bx = bx - bw
-    b.x = bx
-    b.y = 1
-    b.w = bw
-  end
-  local firstBtn = btnList[1]
-  if firstBtn then
-    local gap = firstBtn.x - titleEnd
-    if gap > 0 then
-      term.setTextColor(C.gray)
-      term.write(string.rep(" ", gap))
-    end
-  end
-  for _, b in ipairs(btnList) do
-    term.setBackgroundColor(C.btn)
-    term.setTextColor(colors.black)
-    term.setCursorPos(b.x, b.y)
-    term.write(" " .. b.label .. " ")
+if modemSide == "" then
+  for _, s in ipairs({"right","left","top","bottom","front","back"}) do
+    local ok, e = pcall(rednet.open, s)
+    if ok then modemSide = s; break end
   end
 end
+if modemSide == "" then print("No modem"); fh.close(); return end
+log("modem " .. modemSide)
 
-local function rInput()
-  term.setBackgroundColor(C.inputBg)
-  term.setTextColor(C.gray)
-  rClear(L.inputY)
-  term.write(" > ")
-  local iw = L.w - 3
-  local txt = state.query
-  if #txt > iw then txt = string.sub(txt, #txt - iw + 1) end
-  term.setTextColor(C.white)
-  term.write(txt)
-  if #txt < iw then term.write(string.rep(" ", iw - #txt)) end
-  if state.input then
-    term.setCursorPos(3 + #txt, L.inputY)
-    term.setCursorBlink(true)
-  else
-    term.setCursorBlink(false)
+local server = nil
+local function findServer()
+  local id = rednet.lookup("stockpile")
+  if id and id ~= 0 then server = id; return true end
+  local uuid = math.random(1, 2^32)
+  rednet.send(0, {"usage()", uuid}, "stockpile")
+  for _ = 1, 8 do
+    local rid, msg = rednet.receive("stockpile", 2)
+    if rid and type(msg) == "table" and msg[2] == uuid then server = rid; return true end
   end
+  return false
 end
 
-local function rList()
-  local vis = L.listBot - L.listTop + 1
-  if vis < 1 then return end
-  local n = #state.keys
-  if n == 0 then
-    for i = 1, vis do
-      local y = L.listTop + i - 1
-      term.setBackgroundColor(C.body)
-      rClear(y)
-      if i == math.ceil(vis / 2) then
-        term.setTextColor(C.gray)
-        local msg = " Sin items. Usa SCAN para escanear inventarios."
-        if not state.server then msg = " Sin conexion al servidor."
-        elseif state.status:find("Buscando") then msg = " Buscando servidor..."
-        end
-        term.write(msg)
-      end
-    end
-    return
-  end
-  if state.scroll > n - vis then state.scroll = math.max(0, n - vis) end
-  if state.scroll < 0 then state.scroll = 0 end
-  for i = 1, vis do
-    local y = L.listTop + i - 1
-    if y > L.h then break end
-    rClear(y)
-    local idx = state.scroll + i
-    if idx <= n then
-      local id = state.keys[idx]
-      local amt = state.items[id]
-      local name = id:gsub("^minecraft:", "")
-      local sel = (state.sel == idx)
-      term.setBackgroundColor(sel and C.selBg or C.body)
-      term.setTextColor(C.white)
-      term.write(" " .. name)
-      local barW = 8
-      local fill = math.min(barW, math.ceil(amt / 64 * barW))
-      local x0 = L.w - barW - 6
-      if x0 > term.getCursorPos() then
-        term.setCursorPos(x0, y)
-        term.setTextColor(C.gray)
-        term.write("[" .. string.rep("#", fill) .. string.rep(" ", barW - fill) .. "]")
-      end
-      local amtS = tostring(amt)
-      term.setTextColor(C.green)
-      term.setCursorPos(L.w - #amtS, y)
-      term.write(amtS)
-    end
-  end
-end
-
-local function rStatus()
-  term.setBackgroundColor(C.bar)
-  term.setTextColor(C.white)
-  rClear(L.statusY)
-  local s = " " .. state.status
-  term.write(s)
-  if #state.keys > 0 then
-    local info = " Items: " .. #state.keys .. "  "
-    term.setCursorPos(L.w - #info + 1, L.statusY)
-    term.write(info)
-  end
-end
-
-function GUI.render()
-  term.setBackgroundColor(C.body)
-  term.clear()
-  layout()
-  rHeader()
-  rInput()
-  rList()
-  rStatus()
-end
-
--- Rednet
-local function cmd(cmdStr)
-  if not state.server then
-    state.status = "Error: Sin servidor"
-    log("cmd: sin servidor, comando ignorado:", cmdStr)
-    return nil
-  end
-  local uuid = math.random(1, 2 ^ 32)
-  log("cmd: >>", cmdStr, "uuid:", uuid)
-  rednet.send(state.server, { cmdStr, uuid }, "stockpile")
-  for i = 1, 5 do
+local function cmd(s)
+  if not server then return nil end
+  local uuid = math.random(1, 2^32)
+  rednet.send(server, {s, uuid}, "stockpile")
+  for _ = 1, 5 do
     local id, msg = rednet.receive("stockpile", 2)
-    if id and type(msg) == "table" then
-      log("cmd: recv#" .. i .. " id:", id, "uuid:", tostring(msg[2]))
-      if msg[2] == uuid then
-        log("cmd: resultado:", tostring(msg[1]):sub(1, 200))
-        if state.server == 0 or state.server ~= id then
-          log("cmd: server ID actualizado a:", id)
-          state.server = id
-        end
-        return msg[1]
-      end
+    if id and type(msg) == "table" and msg[2] == uuid then
+      if server ~= id then server = id end; return msg[1]
     end
   end
-  log("cmd: FAIL - sin respuesta para:", cmdStr)
+  log("timeout " .. s)
   return nil
 end
 
-local function findServer()
-  state.status = "Buscando servidor..."
-  log("findServer: lookup...")
-  local id = rednet.lookup("stockpile")
-  if id and id ~= 0 then
-    state.server = id
-    state.status = "Servidor #" .. id
-    log("findServer: OK #" .. id)
-    return true
-  end
-  -- Broadcast discovery: ping all computers on stockpile protocol
-  log("findServer: broadcast discovery...")
-  state.status = "Descubriendo servidor..."
-  local uuid = math.random(1, 2 ^ 32)
-  rednet.send(0, { "usage()", uuid }, "stockpile")
-  for i = 1, 5 do
-    local rid, msg = rednet.receive("stockpile", 2)
-    if rid and type(msg) == "table" and msg[2] == uuid then
-      state.server = rid
-      state.status = "Servidor #" .. rid
-      log("findServer: descubierto #" .. rid)
-      return true
-    end
-  end
-  state.server = nil
-  state.status = "No se encontro servidor Stockpile. Verifica rednet."
-  log("findServer: NO encontrado")
-  return false
-end
+local items, keys, scroll, sel = {}, {}, 0, nil
+local status, mode = "Conectando...", ""
+local w, h = 0, 0
 
-function actSearch(q)
-  if not state.server and not findServer() then return end
-  state.status = "Buscando..."
-  GUI.render()
-  local filter = (q and q ~= "") and q or "."
-  log("actSearch: filter='" .. filter .. "'")
-  local r = cmd('search("' .. filter:gsub('"', '\\"') .. '")')
-  log("actSearch: resultado type=" .. type(r))
-  if type(r) == "table" then
-    state.items = r
-    state.keys = {}
-    for k, _ in pairs(r) do table.insert(state.keys, k) end
-    table.sort(state.keys)
-    state.scroll = 0
-    state.sel = nil
-    state.status = #state.keys .. " items encontrados"
-    log("actSearch: " .. #state.keys .. " items")
-  elseif r then
-    state.status = "Error: " .. tostring(r)
-    log("actSearch: error del servidor: " .. tostring(r))
-  else
-    state.status = "Error: timeout busqueda. Verifica conexion."
-    log("actSearch: timeout")
-  end
-end
+local function wh() w, h = term.getSize() end
 
--- Acciones
-local function actDump()
-  if not state.server and not findServer() then return end
-  log("actDump: iniciando")
-  state.status = "Escaneando dump..."
-  GUI.render()
-  local r = cmd("scan(units.dump)")
-  log("actDump: scan dump=" .. tostring(r))
-  r = cmd("move_item(units.dump, units.storage)")
-  log("actDump: move=" .. tostring(r))
-  state.status = r and tostring(r) or "Error: timeout dump"
-  actSearch(state.query)
-end
+local function render()
+  wh()
+  term.setBackgroundColor(colors.black); term.clear()
 
-local function actRetrieve()
-  if not state.server and not findServer() then return end
-  if not state.sel then
-    state.status = "Selecciona un item primero"
-    return
-  end
-  local id = state.keys[state.sel]
-  if not id then return end
-  log("actRetrieve: " .. id)
-  state.status = "Trayendo " .. id:gsub("^minecraft:", "") .. " al dump..."
-  GUI.render()
-  local r = cmd('move_item(units.storage, units.dump, "' .. id:gsub('"', '\\"') .. '")')
-  log("actRetrieve: resultado=" .. tostring(r))
-  state.status = r and tostring(r) or "Error: timeout retrieve"
-  actSearch(state.query)
-end
+  -- Header line
+  term.setBackgroundColor(colors.blue)
+  term.setCursorPos(1,1); term.clearLine()
 
-local function actPush()
-  if not state.server and not findServer() then return end
-  log("actPush: iniciando")
-  state.status = "Push al dump..."
-  GUI.render()
-  local r = cmd("move_item(units.storage, units.dump)")
-  log("actPush: resultado=" .. tostring(r))
-  state.status = r and tostring(r) or "Error: timeout"
-  actSearch(state.query)
-end
-
-local function actRefresh()
-  actSearch(state.query)
-end
-
-local function actUsage()
-  if not state.server and not findServer() then return end
-  log("actUsage:")
-  local r = cmd("usage()")
-  log("actUsage: resultado=" .. tostring(r))
-  if type(r) == "table" then
-    local u = r.used_slots or 0
-    local t = r.total_slots or 0
-    local p = t > 0 and math.floor(u / t * 100) or 0
-    state.status = string.format("Uso: %d/%d slots (%d%%)", u, t, p)
-  else
-    state.status = r and tostring(r) or "Error: timeout"
-  end
-end
-
-local function actScanAll()
-  if not state.server and not findServer() then return end
-  log("actScanAll:")
-  state.status = "Actualizando inventarios..."
-  GUI.render()
-  cmd("unit.get()")
-  local units_reply = cmd("unit.get()")
-  log("actScanAll: units=" .. textutils.serialize(units_reply):sub(1, 300))
-  -- Auto-crear storage desde undefined si existe
-  if type(units_reply) == "table" and type(units_reply.undefined) == "table" and #units_reply.undefined > 0 then
-    local invs_str = textutils.serialize(units_reply.undefined)
-    cmd('unit.set("storage",' .. invs_str .. ')')
-    log("actScanAll: storage auto-creado desde undefined")
-  end
-  local all_scans_ok = true
-  for _, name in ipairs({"storage", "dump", "undefined"}) do
-    local r = cmd('scan(units.' .. name .. ')')
-    log("actScanAll: scan " .. name .. "=" .. tostring(r))
-    if not r or tostring(r):find("Error") then all_scans_ok = false end
-  end
-  state.status = all_scans_ok and "Scan completado" or "Algun scan fallo (revisa log)"
-  actSearch(state.query)
-end
-
-local function actTest()
-  if not state.server and not findServer() then return end
-  log("actTest: === DIAGNOSTICO ===")
-  state.status = "Diagnosticando..."
-  GUI.render()
-  local r1 = cmd("unit.get()")
-  log("actTest: unit.get=" .. textutils.serialize(r1):sub(1, 500))
-  local r2 = cmd("usage()")
-  log("actTest: usage=" .. textutils.serialize(r2):sub(1, 200))
-  local r3 = cmd('search(".")')
-  log("actTest: search count=" .. (type(r3) == "table" and #r3 or tostring(r3)))
-  state.status = "Diagnostico listo. Revisa " .. logFile
-end
-
--- Input
-local function handleClick(x, y)
-  for _, b in ipairs(btnList) do
-    if b.x and y == b.y and x >= b.x and x < b.x + b.w then
-      log("click: boton '" .. b.label .. "'")
-      b.action()
-      return true
-    end
-  end
-  if y >= L.listTop and y <= L.listBot then
-    local idx = state.scroll + (y - L.listTop) + 1
-    if idx <= #state.keys then
-      state.sel = (state.sel == idx) and nil or idx
-      log("click: seleccion item #" .. idx)
-    end
-    return true
-  end
-  if y == L.inputY then
-    state.input = true
-    log("click: activado input")
-    return true
-  end
-  state.input = false
-  return false
-end
-
-local function handleKey(code)
-  if state.input then
-    if code == keys.enter then
-      state.input = false
-      log("key: enter, buscando '" .. state.query .. "'")
-      actSearch(state.query)
-    elseif code == keys.tab or code == keys.escape then
-      state.input = false
-    elseif code == keys.backspace then
-      state.query = string.sub(state.query, 1, -2)
-    elseif code == keys.up then
-      if #state.keys > 0 then
-        state.sel = state.sel and math.max(1, state.sel - 1) or 1
-        if state.sel <= state.scroll then state.scroll = math.max(0, state.sel - 1) end
-      end
-    elseif code == keys.down then
-      if #state.keys > 0 then
-        state.sel = state.sel and math.min(#state.keys, state.sel + 1) or 1
-        local vis = L.listBot - L.listTop + 1
-        if state.sel > state.scroll + vis then state.scroll = state.sel - vis end
-      end
-    elseif code == keys.pageUp then
-      local vis = L.listBot - L.listTop + 1
-      state.scroll = math.max(0, state.scroll - vis)
-    elseif code == keys.pageDown then
-      local vis = L.listBot - L.listTop + 1
-      state.scroll = state.scroll + vis
-    end
-  else
-    if code == keys.up then
-      if #state.keys > 0 then
-        state.sel = state.sel and math.max(1, state.sel - 1) or 1
-        if state.sel <= state.scroll then state.scroll = math.max(0, state.sel - 1) end
-      end
-    elseif code == keys.down then
-      if #state.keys > 0 then
-        state.sel = state.sel and math.min(#state.keys, state.sel + 1) or 1
-        local vis = L.listBot - L.listTop + 1
-        if state.sel > state.scroll + vis then state.scroll = state.sel - vis end
-      end
-    elseif code == keys.pageUp then
-      local vis = L.listBot - L.listTop + 1
-      state.scroll = math.max(0, state.scroll - vis)
-    elseif code == keys.pageDown then
-      local vis = L.listBot - L.listTop + 1
-      state.scroll = state.scroll + vis
-    elseif code == keys.enter and state.sel then
-      actRetrieve()
-    elseif code == keys.tab then
-      state.input = true
-    end
-  end
-end
-
-local function handleChar(ch)
-  if state.input then
-    state.query = state.query .. ch
-  end
-end
-
-local function actSetup()
-  if not state.server and not findServer() then return end
-  log("actSetup: === SETUP ===")
-  state.status = "Configurando..."
-  GUI.render()
-  local units_tbl = cmd("unit.get()")
-  log("actSetup: unit.get=" .. textutils.serialize(units_tbl):sub(1, 300))
-  if type(units_tbl) ~= "table" then
-    state.status = "Error: no se pudo obtener units"
-    actSearch(state.query)
-    return
-  end
-  -- Auto-crear storage desde undefined si hay
-  local undef = units_tbl.undefined
-  if type(undef) == "table" and #undef > 0 then
-    local invs_str = textutils.serialize(undef)
-    cmd('unit.set("storage",' .. invs_str .. ')')
-    cmd('scan(units.storage)')
-    state.status = "Storage creado con " .. #undef .. " inventarios. Configura dump manualmente."
-  else
-    local stor = units_tbl.storage
-    if type(stor) == "table" and #stor > 0 then
-      cmd('scan(units.storage)')
-      state.status = #stor .. " inventarios en storage escaneados."
-      local dump = units_tbl.dump
-      if type(dump) ~= "table" or #dump == 0 then
-        state.status = state.status .. " Falta configurar units.dump"
-      end
+  local hbtns = {"[?]","[\30]","[\31]"," x"}
+  local bx = w + 1
+  for i = #hbtns, 1, -1 do
+    local lbl = hbtns[i]
+    local bw = (i == #hbtns) and #lbl or #lbl + 2
+    bx = bx - bw
+    if i == #hbtns then
+      term.setBackgroundColor(colors.red); term.setTextColor(colors.white)
     else
-      state.status = "No hay inventarios detectados. Anadelos manualmente con Add."
+      term.setBackgroundColor(colors.cyan); term.setTextColor(colors.black)
+    end
+    term.setCursorPos(bx, 1)
+    if i == #hbtns then term.write(lbl) else term.write(" " .. lbl .. " ") end
+  end
+
+  -- Status at top-left
+  term.setBackgroundColor(colors.blue)
+  term.setCursorPos(2, 1)
+  if mode == "wait" then
+    term.setTextColor(colors.yellow); term.write(status)
+  else
+    term.setTextColor(colors.white); term.write(status)
+    if #keys > 0 then
+      term.setTextColor(colors.lightGray); term.write("  " .. #keys .. " items")
     end
   end
-  actSearch(state.query)
-end
 
-local function actAddChest()
-  if not state.server and not findServer() then return end
-  local name = state.query
-  if not name or name == "" then
-    state.status = "Escribe nombre del cofre (ej: minecraft:chest_59) y pulsa Add"
-    return
-  end
-  log("actAddChest: " .. name)
-  state.status = "Anadiendo " .. name .. "..."
-  GUI.render()
-  cmd('unit.add("storage",{"' .. name:gsub('"', '\\"') .. '"})')
-  cmd("scan(units.storage)")
-  state.status = "Anadido " .. name .. " y escaneado"
-  actSearch(state.query)
-end
-
-function GUI.start()
-  layout()
-  log("layout: " .. L.w .. "x" .. L.h)
-
-  btn("Q", function() error("quit") end)
-  btn("Add", actAddChest)
-  btn("Test", actTest)
-  btn("Setup", actSetup)
-  btn("Usage", actUsage)
-  btn("Scan", actScanAll)
-  btn("Push", actPush)
-  btn("Refresh", actRefresh)
-  btn("Retrieve", actRetrieve)
-  btn("Dump", actDump)
-
-  log("buscando servidor...")
-  findServer()
-  log("servidor encontrado: " .. tostring(state.server))
-  actSearch("")
-
-  GUI.render()
-
-  local ok, err = pcall(function()
-    while true do
-      local ev = { os.pullEventRaw() }
-      local t = ev[1]
-      if t == "mouse_click" then
-        handleClick(ev[3], ev[4])
-        GUI.render()
-      elseif t == "mouse_scroll" then
-        if ev[2] > 0 then state.scroll = state.scroll + 1
-        else state.scroll = math.max(0, state.scroll - 1) end
-        GUI.render()
-      elseif t == "key" then
-        handleKey(ev[2])
-        GUI.render()
-      elseif t == "char" then
-        handleChar(ev[2])
-        GUI.render()
-      elseif t == "term_resize" then
-        GUI.render()
+  -- Items (line 2 to h)
+  local vis = h - 1
+  if #keys == 0 then
+    for i = 2, h do
+      term.setBackgroundColor(colors.black); term.setCursorPos(1, i); term.clearLine()
+    end
+    term.setCursorPos(3, 2 + math.floor((vis-1)/2)); term.setTextColor(colors.gray)
+    term.write(status)
+  else
+    if scroll > #keys - vis then scroll = math.max(0, #keys - vis) end
+    for i = 0, vis - 1 do
+      local y = 2 + i; local idx = scroll + i + 1
+      term.setBackgroundColor(sel == idx and colors.blue or colors.black)
+      term.setCursorPos(1, y); term.clearLine()
+      if idx <= #keys then
+        local name = keys[idx]:match(":(.+)$") or keys[idx]
+        name = (name:match("^([^%-]+)") or name):gsub("_", " ")
+        local amt = tostring(items[keys[idx]])
+        term.setTextColor(colors.white); term.setCursorPos(2, y); term.write(name)
+        term.setTextColor(colors.green); term.setCursorPos(w - #amt - 1, y); term.write(amt)
       end
     end
-  end)
+  end
+end
 
-  if fh then fh.close() end
-  term.setBackgroundColor(colors.black)
-  term.setTextColor(colors.white)
-  term.clear()
-  term.setCursorPos(1, 1)
-  if err and err ~= "quit" then
-    log("Error fatal: " .. tostring(err))
-    print("Error: " .. tostring(err))
-    print("Log: " .. logFile)
+local dumpItems, dumpInit = {}, false
+local function autoScan()
+  local utbl = cmd("unit.get()")
+  if type(utbl) == "table" then
+    for _, u in ipairs({"storage","dump","undefined"}) do
+      if type(utbl[u]) == "table" and #utbl[u] > 0 then cmd('scan(units.' .. u .. ')') end
+    end
+    -- Build dump items set (hides dump chest items from search)
+    dumpItems = {}
+    if type(utbl.dump) == "table" and #utbl.dump > 0 then
+      local ct = cmd("get_content()")
+      if type(ct) == "table" and type(ct.inv_index) == "table" then
+        for _, inv in ipairs(utbl.dump) do
+          if type(ct.inv_index[inv]) == "table" then
+            for _, s in pairs(ct.inv_index[inv]) do
+              if type(s) == "table" then for k, q in pairs(s) do
+                if type(k) == "string" and q > 0 then dumpItems[k] = true end
+              end end
+            end
+          end
+        end
+      end
+    end
+  end
+  return utbl
+end
+
+local function actSearch(q)
+  if mode == "wait" then return end
+  mode = "wait"
+  -- Build dump cache on first use
+  if not dumpInit then
+    dumpInit = true
+    local ut = cmd("unit.get()")
+    if type(ut) == "table" and type(ut.dump) == "table" and #ut.dump > 0 then
+      local ct = cmd("get_content()")
+      if type(ct) == "table" and type(ct.inv_index) == "table" then
+        for _, inv in ipairs(ut.dump) do
+          if type(ct.inv_index[inv]) == "table" then
+            for _, s in pairs(ct.inv_index[inv]) do
+              if type(s) == "table" then for k, q in pairs(s) do
+                if type(k) == "string" and q > 0 then dumpItems[k] = true end
+              end end
+            end
+          end
+        end
+      end
+    end
+  end
+  local filter = (q and q ~= "") and q or "."
+  local r = cmd('search("' .. filter:gsub('"', '\\"') .. '")')
+  if type(r) == "table" then
+    items = r; keys = {}; for k, _ in pairs(r) do table.insert(keys, k) end
+    table.sort(keys); scroll = 0; sel = nil
+    if #keys == 0 and filter ~= "." then
+      local r2 = cmd('search(".")')
+      if type(r2) == "table" then
+        items = r2; keys = {}; for k, _ in pairs(r2) do table.insert(keys, k) end
+        table.sort(keys)
+        status = 'Sin resultados para "' .. q .. '"'
+      else status = r2 and tostring(r2) or "timeout" end
+    else status = "OK" end
+    -- Hide items in the front chest, and items in dump chests
+    if #keys > 0 then
+      local chest = peripheral.find("inventory")
+      local localItems = {}
+      if chest then
+        for _, slot in pairs(chest.list()) do
+          if slot and slot.name then localItems[slot.name] = true end
+        end
+      end
+      local filtered = {}
+      for _, k in ipairs(keys) do
+        if not dumpItems[k] and not localItems[k] then table.insert(filtered, k) end
+      end
+      keys = filtered
+    end
+  else status = r and tostring(r) or "timeout" end
+  mode = ""
+end
+
+local function actDump()
+  if mode == "wait" then return end
+  mode = "wait"; status = "Dump..."; render(); log("dump")
+  local utbl = autoScan()
+  if type(utbl) ~= "table" or type(utbl.dump) ~= "table" or #utbl.dump == 0 then
+    status = "Dump vacio"; mode = ""; return
+  end
+  local r = cmd("move_item(units.dump, units.storage)")
+  status = r and tostring(r) or "timeout"; mode = ""; actSearch("")
+end
+
+local function actGet()
+  if mode == "wait" then return end
+  if not sel or not keys[sel] then status = "Selecciona item"; return end
+  mode = "wait"; status = "Get..."; render(); log("get " .. keys[sel])
+  local utbl = autoScan()
+  if type(utbl) ~= "table" or type(utbl.dump) ~= "table" or #utbl.dump == 0 then
+    status = "Dump vacio"; mode = ""; return
+  end
+  local r = cmd('move_item(units.storage, units.dump, "' .. keys[sel]:gsub('"', '\\"') .. '")')
+  status = r and tostring(r) or "timeout"; mode = ""; actSearch("")
+end
+
+local function actSearchPrompt()
+  if mode == "wait" then return end
+  mode = "wait"
+  wh(); render()
+  term.setCursorPos(2, 1); term.setBackgroundColor(colors.black)
+  term.clearLine(); term.setTextColor(colors.white)
+  term.write("Buscar: ")
+  term.setCursorBlink(true)
+  local q = read()
+  term.setCursorBlink(false)
+  if q and q ~= "" then
+    status = "Buscando..."
+    mode = ""; actSearch(q)
   else
-    log("=== Salida normal ===")
-    print("Cliente cerrado. Log: " .. logFile)
+    status = "OK"
+    mode = ""; render()
   end
 end
 
--- Arranque
-local modemOpen = false
-for _, side in ipairs(peripheral.getNames()) do
-  if peripheral.hasType(side, "modem") then
-    rednet.open(side)
-    modemOpen = true
-    log("modem abierto en: " .. side)
-    break
-  end
-end
-if not modemOpen then
-  local ok2, err2 = pcall(function() rednet.open("right") end)
-  if ok2 then
-    log("modem abierto en: right (fallback)")
-    modemOpen = true
-  else
-    log("ERROR: no se pudo abrir modem en ningun lado")
-    term.clear()
-    term.setCursorPos(1, 1)
-    print("Error: No se encontro modem")
-    print("Conecta un modem y reinicia.")
-    if fh then fh.close() end
-    return
-  end
-end
+if not findServer() then print("Servidor no encontrado"); fh.close(); return end
+log("server " .. server)
+status = "OK  S=buscar D=dumpIn G=get R=refresh Q=quit"
+actSearch(""); render()
 
-GUI.start()
+local ok, err = pcall(function()
+  while true do
+    local ev = {os.pullEventRaw()}
+    local t = ev[1]
+    if t == "key" then
+      local code = ev[2]
+      if mode == "wait" then
+        if code == 16 or (keys.q and code == keys.q) then error("quit") end
+      elseif code == 31 or (keys.s and code == keys.s) then actSearchPrompt()
+      elseif code == 32 or (keys.d and code == keys.d) then actDump()
+      elseif code == 34 or (keys.g and code == keys.g) then actGet()
+      elseif code == 19 or (keys.r and code == keys.r) then actSearch("")
+      elseif code == 16 or (keys.q and code == keys.q) then error("quit")
+      elseif (code == 200) or (keys.up and code == keys.up) then
+        if #keys > 0 then sel = sel and math.max(1,sel-1) or 1
+          if sel <= scroll then scroll = math.max(0,scroll-1) end end
+      elseif (code == 208) or (keys.down and code == keys.down) then
+        if #keys > 0 then sel = sel and math.min(#keys,sel+1) or 1
+          if sel > scroll + h - 1 then scroll = sel - (h - 1) end end
+      end
+    elseif t == "mouse_click" then
+      local x, y = ev[3], ev[4]
+      if mode ~= "wait" and y == 1 then
+        local hbtns = {"[?]","[\30]","[\31]"," x"}
+        local bx = w + 1
+        for i = #hbtns, 1, -1 do
+          local lbl = hbtns[i]
+          local bw = (i == #hbtns) and #lbl or #lbl + 2
+          bx = bx - bw
+          if x >= bx and x < bx + bw then
+            if i == 1 then actSearchPrompt()
+            elseif i == 2 then actDump()
+            elseif i == 3 then actGet()
+            elseif i == 4 then error("quit") end
+            break
+          end
+        end
+      elseif mode ~= "wait" and y >= 2 then
+        local idx = scroll + (y - 2) + 1
+        if idx <= #keys then sel = (sel == idx) and nil or idx end
+      end
+    elseif t == "mouse_scroll" then
+      if mode ~= "wait" then scroll = math.max(0, scroll + (ev[2] > 0 and 1 or -1)) end
+    end
+    render()
+  end
+end)
+
+fh.close()
+term.setBackgroundColor(colors.black); term.setTextColor(colors.white)
+term.clear(); term.setCursorPos(1,1)
+if err and err ~= "quit" then print("Error: " .. tostring(err) .. "  log:" .. logFile) end
